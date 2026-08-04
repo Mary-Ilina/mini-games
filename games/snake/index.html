@@ -13,6 +13,8 @@
     --snake: #5ee6a0;
     --snake-head: #8ef5c0;
     --food: #ff6b6b;
+    --heart: #ff9ecf;
+    --obstacle: #4a5262;
     --text: #eef1f5;
     --muted: #9aa2ad;
   }
@@ -53,8 +55,11 @@
     justify-content: space-between;
     margin-bottom: 0.75rem;
     font-size: 1.1rem;
+    flex-wrap: wrap;
+    gap: 0.4rem;
   }
   .hud .label { color: var(--muted); font-size: 0.85rem; margin-right: 0.35rem; }
+  #lives .heart-icon { color: var(--heart); }
   #board-wrap {
     position: relative;
     line-height: 0;
@@ -113,6 +118,8 @@
   <h1>Snake</h1>
   <div class="hud">
     <div><span class="label">Score</span><span id="score">0</span></div>
+    <div><span class="label">Level</span><span id="level">1</span></div>
+    <div id="lives"><span class="label">Lives</span><span id="lives-value"></span></div>
     <div><span class="label">Best</span><span id="best">0</span></div>
   </div>
   <div id="board-wrap">
@@ -123,7 +130,7 @@
       <button id="restart">Play again</button>
     </div>
   </div>
-  <p class="hint">Arrow keys or WASD to move. Space to restart after game over.</p>
+  <p class="hint">Arrow keys or WASD to move. Space to restart after game over. Clear obstacles courses and collect the pink heart to regain a life.</p>
 
 <script>
 (function () {
@@ -134,7 +141,10 @@
   const ctx = canvas.getContext('2d');
   const scoreEl = document.getElementById('score');
   const bestEl = document.getElementById('best');
+  const levelEl = document.getElementById('level');
+  const livesEl = document.getElementById('lives-value');
   const overlay = document.getElementById('overlay');
+  const overlayTitle = document.getElementById('overlay-title');
   const overlayMsg = document.getElementById('overlay-msg');
   const restartBtn = document.getElementById('restart');
 
@@ -142,36 +152,166 @@
   let best = parseInt(localStorage.getItem(BEST_KEY) || '0', 10);
   bestEl.textContent = best;
 
-  let snake, dir, nextDir, food, score, alive, tickHandle;
-  const TICK_MS = 110;
+  const START_SNAKE = [
+    { x: 9, y: 10 },
+    { x: 8, y: 10 },
+    { x: 7, y: 10 },
+  ];
+  const START_DIR = { x: 1, y: 0 };
+  const MAX_LIVES = 3;
+  const FRUIT_TARGET = 5; // normal fruit needed to clear a level
+  const LEVEL_COUNT = 3;
+  const BASE_TICK_MS = 110;
+  const LAP_SPEEDUP_MS = 12; // each lap through levels 1-3 gets faster
+  const MIN_TICK_MS = 45;
+  const LIFE_FRUIT_CHANCE = 0.015; // per tick chance to spawn if eligible
+  const OBSTACLE_COUNTS = [0, 18, 32]; // per level, index = level-1
+
+  let snake, dir, nextDir, food, lifeFood, score, lives, alive, tickHandle;
+  let level, lap, fruitEaten, obstacles, tickMs, pendingRespawn;
 
   function randCell() {
     return { x: Math.floor(Math.random() * COLS), y: Math.floor(Math.random() * ROWS) };
+  }
+
+  function cellKey(c) { return c.x + ',' + c.y; }
+
+  // BFS reachability check: every non-obstacle cell must be reachable from the
+  // snake's starting cell, so no obstacle layout can seal off part of the grid.
+  function isLayoutReachable(obstacleSet) {
+    const startCell = START_SNAKE[0];
+    if (obstacleSet.has(cellKey(startCell))) return false;
+    const visited = new Set([cellKey(startCell)]);
+    const queue = [startCell];
+    while (queue.length) {
+      const cur = queue.shift();
+      const neighbors = [
+        { x: cur.x + 1, y: cur.y }, { x: cur.x - 1, y: cur.y },
+        { x: cur.x, y: cur.y + 1 }, { x: cur.x, y: cur.y - 1 },
+      ];
+      for (const n of neighbors) {
+        if (n.x < 0 || n.x >= COLS || n.y < 0 || n.y >= ROWS) continue;
+        const k = cellKey(n);
+        if (visited.has(k) || obstacleSet.has(k)) continue;
+        visited.add(k);
+        queue.push(n);
+      }
+    }
+    let totalOpen = 0;
+    for (let x = 0; x < COLS; x++) {
+      for (let y = 0; y < ROWS; y++) {
+        if (!obstacleSet.has(x + ',' + y)) totalOpen++;
+      }
+    }
+    return visited.size === totalOpen;
+  }
+
+  function generateObstacles(count) {
+    if (count <= 0) return [];
+    const startOccupied = new Set(START_SNAKE.map(cellKey));
+    let attempt = 0;
+    while (attempt < 200) {
+      attempt++;
+      const set = new Set();
+      const list = [];
+      let guard = 0;
+      while (list.length < count && guard < count * 40) {
+        guard++;
+        const c = randCell();
+        const k = cellKey(c);
+        if (startOccupied.has(k) || set.has(k)) continue;
+        set.add(k);
+        list.push(c);
+      }
+      if (isLayoutReachable(set)) return list;
+    }
+    // Fallback: no obstacles rather than risk an unsolvable layout.
+    return [];
+  }
+
+  function buildLevel(lvl) {
+    obstacles = generateObstacles(OBSTACLE_COUNTS[lvl - 1] || 0);
+  }
+
+  function occupiedByObstacle(cell) {
+    return obstacles.some(o => o.x === cell.x && o.y === cell.y);
   }
 
   function spawnFood() {
     let cell;
     do {
       cell = randCell();
-    } while (snake.some(s => s.x === cell.x && s.y === cell.y));
+    } while (
+      snake.some(s => s.x === cell.x && s.y === cell.y) ||
+      occupiedByObstacle(cell) ||
+      (lifeFood && lifeFood.x === cell.x && lifeFood.y === cell.y)
+    );
     food = cell;
   }
 
-  function reset() {
-    snake = [
-      { x: 9, y: 10 },
-      { x: 8, y: 10 },
-      { x: 7, y: 10 },
-    ];
-    dir = { x: 1, y: 0 };
-    nextDir = dir;
-    score = 0;
-    alive = true;
+  function maybeSpawnLifeFood() {
+    if (lifeFood) return;
+    if (lives >= MAX_LIVES) return;
+    if (Math.random() > LIFE_FRUIT_CHANCE) return;
+    let cell;
+    let guard = 0;
+    do {
+      cell = randCell();
+      guard++;
+    } while (
+      guard < 200 && (
+        snake.some(s => s.x === cell.x && s.y === cell.y) ||
+        occupiedByObstacle(cell) ||
+        (food && food.x === cell.x && food.y === cell.y)
+      )
+    );
+    if (guard < 200) lifeFood = cell;
+  }
+
+  function updateHud() {
     scoreEl.textContent = score;
+    levelEl.textContent = level;
+    livesEl.textContent = '♥'.repeat(Math.max(lives, 0)) + '♡'.repeat(Math.max(MAX_LIVES - lives, 0));
+  }
+
+  function startRun() {
+    level = 1;
+    lap = 0;
+    lives = MAX_LIVES;
+    score = 0;
+    tickMs = BASE_TICK_MS;
+    buildLevel(level);
+    placeSnakeAtStart();
+    alive = true;
     overlay.classList.remove('show');
-    spawnFood();
+    updateHud();
     if (tickHandle) clearInterval(tickHandle);
-    tickHandle = setInterval(tick, TICK_MS);
+    tickHandle = setInterval(tick, tickMs);
+    draw();
+  }
+
+  function placeSnakeAtStart() {
+    snake = START_SNAKE.map(c => ({ x: c.x, y: c.y }));
+    dir = { x: START_DIR.x, y: START_DIR.y };
+    nextDir = dir;
+    fruitEaten = 0;
+    lifeFood = null;
+    spawnFood();
+  }
+
+  function restartTicker() {
+    clearInterval(tickHandle);
+    tickHandle = setInterval(tick, tickMs);
+  }
+
+  function loseLife() {
+    lives -= 1;
+    updateHud();
+    if (lives <= 0) {
+      endGame();
+      return;
+    }
+    placeSnakeAtStart();
     draw();
   }
 
@@ -183,8 +323,24 @@
       localStorage.setItem(BEST_KEY, String(best));
       bestEl.textContent = best;
     }
-    overlayMsg.textContent = 'Final score: ' + score;
+    overlayTitle.textContent = 'Game Over';
+    overlayMsg.textContent = 'Final score: ' + score + ' — reached level ' + level + ' (lap ' + (lap + 1) + ')';
     overlay.classList.add('show');
+  }
+
+  function advanceLevel() {
+    if (level < LEVEL_COUNT) {
+      level += 1;
+    } else {
+      // Completed a lap through all levels: loop back to level 1, faster.
+      level = 1;
+      lap += 1;
+      tickMs = Math.max(MIN_TICK_MS, BASE_TICK_MS - lap * LAP_SPEEDUP_MS);
+      restartTicker();
+    }
+    buildLevel(level);
+    placeSnakeAtStart();
+    updateHud();
   }
 
   function tick() {
@@ -192,24 +348,43 @@
     const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
 
     if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
-      endGame();
+      loseLife();
+      return;
+    }
+    if (occupiedByObstacle(head)) {
+      loseLife();
       return;
     }
     if (snake.some(s => s.x === head.x && s.y === head.y)) {
-      endGame();
+      loseLife();
       return;
     }
 
     snake.unshift(head);
 
+    let grew = false;
     if (head.x === food.x && head.y === food.y) {
       score += 1;
-      scoreEl.textContent = score;
+      fruitEaten += 1;
+      grew = true;
+      if (fruitEaten >= FRUIT_TARGET) {
+        advanceLevel();
+        draw();
+        return;
+      }
       spawnFood();
-    } else {
+    } else if (lifeFood && head.x === lifeFood.x && head.y === lifeFood.y) {
+      lives = Math.min(MAX_LIVES, lives + 1);
+      lifeFood = null;
+      grew = true;
+      updateHud();
+    }
+
+    if (!grew) {
       snake.pop();
     }
 
+    maybeSpawnLifeFood();
     draw();
   }
 
@@ -232,15 +407,38 @@
       ctx.stroke();
     }
 
+    ctx.fillStyle = '#4a5262';
+    obstacles.forEach(o => {
+      roundRect(o.x * CELL + 2, o.y * CELL + 2, CELL - 4, CELL - 4, 3);
+      ctx.fill();
+    });
+
     ctx.fillStyle = '#ff6b6b';
     roundRect(food.x * CELL + 2, food.y * CELL + 2, CELL - 4, CELL - 4, 4);
     ctx.fill();
+
+    if (lifeFood) {
+      drawHeart(lifeFood.x * CELL + CELL / 2, lifeFood.y * CELL + CELL / 2, CELL * 0.4);
+    }
 
     snake.forEach((seg, i) => {
       ctx.fillStyle = i === 0 ? '#8ef5c0' : '#5ee6a0';
       roundRect(seg.x * CELL + 1, seg.y * CELL + 1, CELL - 2, CELL - 2, 4);
       ctx.fill();
     });
+  }
+
+  function drawHeart(cx, cy, size) {
+    ctx.fillStyle = '#ff9ecf';
+    ctx.beginPath();
+    const topCurveHeight = size * 0.3;
+    ctx.moveTo(cx, cy + size * 0.35);
+    ctx.bezierCurveTo(cx, cy, cx - size / 2, cy, cx - size / 2, cy + topCurveHeight);
+    ctx.bezierCurveTo(cx - size / 2, cy + (size + topCurveHeight) / 2, cx, cy + (size + topCurveHeight) / 1.4, cx, cy + size);
+    ctx.bezierCurveTo(cx, cy + (size + topCurveHeight) / 1.4, cx + size / 2, cy + (size + topCurveHeight) / 2, cx + size / 2, cy + topCurveHeight);
+    ctx.bezierCurveTo(cx + size / 2, cy, cx, cy, cx, cy + size * 0.35);
+    ctx.closePath();
+    ctx.fill();
   }
 
   function roundRect(x, y, w, h, r) {
@@ -266,7 +464,7 @@
     if (!alive) {
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
-        reset();
+        startRun();
       }
       return;
     }
@@ -277,9 +475,9 @@
     nextDir = wanted;
   });
 
-  restartBtn.addEventListener('click', reset);
+  restartBtn.addEventListener('click', startRun);
 
-  reset();
+  startRun();
 })();
 </script>
 </body>
