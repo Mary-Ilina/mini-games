@@ -421,7 +421,7 @@
     ctx.fill();
 
     if (lifeFood) {
-      drawHeart(lifeFood.x * CELL + CELL / 2, lifeFood.y * CELL + CELL / 2, CELL * 0.4);
+      drawHeart(lifeFood.x * CELL + CELL / 2, lifeFood.y * CELL + CELL / 2 - (CELL - 4) / 2, CELL - 4);
     }
 
     snake.forEach((seg, i) => {
