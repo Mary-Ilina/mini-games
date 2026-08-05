@@ -7,6 +7,7 @@ Live site: https://mary-ilina.github.io/mini-games/
 ## Games
 
 - Snake (`games/snake/`) — classic grid snake, arrow keys or WASD.
+- Snake 3D (`games/snake-3d/`) — snake in a rendered 3D cube, arrow keys + W/S to move, drag/A/D/Q/E to orbit.
 
 ## Adding a new game
 
