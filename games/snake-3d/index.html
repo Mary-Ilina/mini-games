@@ -142,8 +142,9 @@
 
   const CANVAS_W = 460;
   const CANVAS_H = 320;
-  const CENTER_X = 236;
-  const CENTER_Y = 134;
+  // Projection origin, tuned so the tilted board sits centred on the canvas.
+  const CENTER_X = 245;
+  const CENTER_Y = 142;
   const CAMERA_DIST = 560;
   const FOCAL = 480;
 
@@ -176,7 +177,11 @@
   let snake, dir, nextDir, food, score, alive, tickMs, speedLevel, tickHandle;
 
   // Fixed isometric-style camera: constant yaw/pitch, never rotated at runtime.
-  const cam = { yaw: 0.7, pitch: -0.42 };
+  // Yaw is kept small on purpose so the grid's x axis stays near-horizontal and
+  // its y axis near-vertical on screen — pressing Right must *look* like right.
+  // The pitch supplies the downward tilt that reveals each block's top face
+  // alongside its front/side faces.
+  const cam = { yaw: 0.12, pitch: -0.8 };
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
@@ -200,10 +205,14 @@
   }
 
   // Maps a flat grid cell to its floor position in world space (y = 0).
+  // The camera looks down the +z axis from above, so +z is *away* from the
+  // viewer and projects upward on screen. Grid row 0 therefore has to sit at
+  // +z (top of the board) and row ROWS-1 at -z, otherwise pressing Down would
+  // walk the snake toward the top of the screen.
   function floorPos(cell) {
     return {
       x: (cell.x - (COLS - 1) / 2) * CELL,
-      z: (cell.y - (ROWS - 1) / 2) * CELL,
+      z: ((ROWS - 1) / 2 - cell.y) * CELL,
     };
   }
 
@@ -398,16 +407,22 @@
   }
 
   // --- input: arrow keys and WASD both move the snake, identically -------
-  const KEY_MAP = {
+  // Arrows are matched on e.key: 'ArrowUp' & co. are layout-independent.
+  const ARROW_DIRS = {
     ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 },
     ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
-    w: { x: 0, y: -1 }, s: { x: 0, y: 1 },
-    a: { x: -1, y: 0 }, d: { x: 1, y: 0 },
-    W: { x: 0, y: -1 }, S: { x: 0, y: 1 },
-    A: { x: -1, y: 0 }, D: { x: 1, y: 0 },
+  };
+  // WASD is matched on e.code — the *physical* key position. e.key would be
+  // the character the active layout produces ('ц'/'ф'/'ы'/'в' on a Russian
+  // layout, for instance), so keying off it silently breaks WASD for anyone
+  // not typing on a Latin layout.
+  const CODE_DIRS = {
+    KeyW: { x: 0, y: -1 }, KeyS: { x: 0, y: 1 },
+    KeyA: { x: -1, y: 0 }, KeyD: { x: 1, y: 0 },
   };
 
   window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // leave browser shortcuts alone
     if (!alive) {
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
@@ -415,7 +430,7 @@
       }
       return;
     }
-    const wanted = KEY_MAP[e.key];
+    const wanted = ARROW_DIRS[e.key] || CODE_DIRS[e.code];
     if (!wanted) return;
     e.preventDefault();
     if (wanted.x === -dir.x && wanted.y === -dir.y) return;
