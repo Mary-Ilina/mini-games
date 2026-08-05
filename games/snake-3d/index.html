@@ -66,10 +66,7 @@
     border: 2px solid var(--grid-line);
     border-radius: 8px;
     display: block;
-    cursor: grab;
-    touch-action: none;
   }
-  canvas.dragging { cursor: grabbing; }
   #overlay {
     position: absolute;
     inset: 0;
@@ -123,25 +120,32 @@
     <div><span class="label">Best</span><span id="best">0</span></div>
   </div>
   <div id="board-wrap">
-    <canvas id="board" width="440" height="440"></canvas>
+    <canvas id="board" width="460" height="320"></canvas>
     <div id="overlay">
       <h2 id="overlay-title">Game Over</h2>
       <p id="overlay-msg">Final score: 0</p>
       <button id="restart">Play again</button>
     </div>
   </div>
-  <p class="hint">Move through the cube: Arrow keys = left/right/up/down, W/S = forward/back. Drag the mouse (or A/D and Q/E) to orbit the view. Space to restart after game over.</p>
+  <p class="hint">Arrow keys or WASD to move around the flat board. Space to restart after game over.</p>
 
 <script>
 (function () {
-  const GRID = 8;
-  const CELL = 26;
-  const BOX_HALF = GRID * CELL / 2;
-  const CANVAS_SIZE = 440;
-  const CENTER = CANVAS_SIZE / 2;
+  // Flat 2D grid (x, y only) — the "3D" is purely the rendering of each
+  // cell's occupant as a small shaded block, viewed from a fixed tilt.
+  const COLS = 14;
+  const ROWS = 14;
+  const CELL = 22;
+  const CUBE_HALF = CELL / 2 - 2;
+  const HALF_X = COLS * CELL / 2;
+  const HALF_Z = ROWS * CELL / 2;
+
+  const CANVAS_W = 460;
+  const CANVAS_H = 320;
+  const CENTER_X = 236;
+  const CENTER_Y = 134;
   const CAMERA_DIST = 560;
   const FOCAL = 480;
-  const CUBE_HALF = CELL / 2 - 2;
 
   const canvas = document.getElementById('board');
   const ctx = canvas.getContext('2d');
@@ -159,11 +163,11 @@
   bestEl.textContent = best;
 
   const START_SNAKE = [
-    { x: 4, y: 4, z: 2 },
-    { x: 3, y: 4, z: 2 },
-    { x: 2, y: 4, z: 2 },
+    { x: 6, y: 6 },
+    { x: 5, y: 6 },
+    { x: 4, y: 6 },
   ];
-  const START_DIR = { x: 1, y: 0, z: 0 };
+  const START_DIR = { x: 1, y: 0 };
   const BASE_TICK_MS = 260;
   const MIN_TICK_MS = 90;
   const SPEEDUP_STEP = 16;
@@ -171,13 +175,12 @@
 
   let snake, dir, nextDir, food, score, alive, tickMs, speedLevel, tickHandle;
 
-  const cam = { yaw: 0.7, pitch: -0.45 };
-  const keysHeld = new Set();
-  let dragging = false, lastMouseX = 0, lastMouseY = 0;
+  // Fixed isometric-style camera: constant yaw/pitch, never rotated at runtime.
+  const cam = { yaw: 0.7, pitch: -0.42 };
 
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-  // --- 3D math -------------------------------------------------------
+  // --- 3D math (used only to project flat-grid cells + their blocks) ------
   function rotatePoint(p, yaw, pitch) {
     const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
     const x1 = p.x * cosY + p.z * sinY;
@@ -193,14 +196,14 @@
     const r = rotatePoint(p, cam.yaw, cam.pitch);
     const camZ = r.z + CAMERA_DIST;
     const scale = FOCAL / camZ;
-    return { x: CENTER + r.x * scale, y: CENTER - r.y * scale, z: camZ };
+    return { x: CENTER_X + r.x * scale, y: CENTER_Y - r.y * scale, z: camZ };
   }
 
-  function worldCenter(cell) {
+  // Maps a flat grid cell to its floor position in world space (y = 0).
+  function floorPos(cell) {
     return {
-      x: (cell.x - (GRID - 1) / 2) * CELL,
-      y: (cell.y - (GRID - 1) / 2) * CELL,
-      z: (cell.z - (GRID - 1) / 2) * CELL,
+      x: (cell.x - (COLS - 1) / 2) * CELL,
+      z: (cell.y - (ROWS - 1) / 2) * CELL,
     };
   }
 
@@ -242,53 +245,51 @@
     }
   }
 
-  // --- wireframe play-area box + floor grid ---------------------------
-  const boxCorners = [];
-  for (let i = 0; i < 8; i++) {
-    boxCorners.push({
-      x: (i & 1 ? 1 : -1) * BOX_HALF,
-      y: (i & 2 ? 1 : -1) * BOX_HALF,
-      z: (i & 4 ? 1 : -1) * BOX_HALF,
-    });
-  }
-  const boxEdges = [];
-  for (let i = 0; i < 8; i++) {
-    for (const bit of [1, 2, 4]) {
-      const j = i ^ bit;
-      if (j > i) boxEdges.push({ a: boxCorners[i], b: boxCorners[j], kind: 'box' });
-    }
-  }
+  // --- flat board floor: shaded plane + grid lines --------------------
+  const floorCorners = [
+    { x: -HALF_X, y: 0, z: -HALF_Z },
+    { x: HALF_X, y: 0, z: -HALF_Z },
+    { x: HALF_X, y: 0, z: HALF_Z },
+    { x: -HALF_X, y: 0, z: HALF_Z },
+  ];
   const floorLines = [];
-  for (let k = 0; k <= GRID; k++) {
-    const c = -BOX_HALF + k * CELL;
-    floorLines.push({ a: { x: -BOX_HALF, y: -BOX_HALF, z: c }, b: { x: BOX_HALF, y: -BOX_HALF, z: c }, kind: 'floor' });
-    floorLines.push({ a: { x: c, y: -BOX_HALF, z: -BOX_HALF }, b: { x: c, y: -BOX_HALF, z: BOX_HALF }, kind: 'floor' });
+  for (let i = 0; i <= COLS; i++) {
+    const x = -HALF_X + i * CELL;
+    floorLines.push({ a: { x, y: 0, z: -HALF_Z }, b: { x, y: 0, z: HALF_Z } });
   }
-  const sceneLines = boxEdges.concat(floorLines);
+  for (let j = 0; j <= ROWS; j++) {
+    const z = -HALF_Z + j * CELL;
+    floorLines.push({ a: { x: -HALF_X, y: 0, z }, b: { x: HALF_X, y: 0, z } });
+  }
 
-  function drawLines(lines) {
-    for (const line of lines) {
+  function drawFloor() {
+    const pts = floorCorners.map(project);
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.closePath();
+    ctx.fillStyle = '#23262e';
+    ctx.fill();
+
+    ctx.strokeStyle = 'rgba(38, 42, 50, 0.9)';
+    ctx.lineWidth = 1;
+    for (const line of floorLines) {
       const pa = project(line.a);
       const pb = project(line.b);
       ctx.beginPath();
       ctx.moveTo(pa.x, pa.y);
       ctx.lineTo(pb.x, pb.y);
-      ctx.strokeStyle = line.kind === 'box'
-        ? 'rgba(94, 230, 160, 0.35)'
-        : 'rgba(38, 42, 50, 0.9)';
-      ctx.lineWidth = line.kind === 'box' ? 1.5 : 1;
       ctx.stroke();
     }
   }
 
   // --- game state ------------------------------------------------------
-  function cellsEqual(a, b) { return a.x === b.x && a.y === b.y && a.z === b.z; }
+  function cellsEqual(a, b) { return a.x === b.x && a.y === b.y; }
 
   function randCell() {
     return {
-      x: Math.floor(Math.random() * GRID),
-      y: Math.floor(Math.random() * GRID),
-      z: Math.floor(Math.random() * GRID),
+      x: Math.floor(Math.random() * COLS),
+      y: Math.floor(Math.random() * ROWS),
     };
   }
 
@@ -312,8 +313,8 @@
   }
 
   function startRun() {
-    snake = START_SNAKE.map(c => ({ x: c.x, y: c.y, z: c.z }));
-    dir = { x: START_DIR.x, y: START_DIR.y, z: START_DIR.z };
+    snake = START_SNAKE.map(c => ({ x: c.x, y: c.y }));
+    dir = { x: START_DIR.x, y: START_DIR.y };
     nextDir = dir;
     score = 0;
     speedLevel = 0;
@@ -340,9 +341,9 @@
 
   function tick() {
     dir = nextDir;
-    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y, z: snake[0].z + dir.z };
+    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
 
-    if (head.x < 0 || head.x >= GRID || head.y < 0 || head.y >= GRID || head.z < 0 || head.z >= GRID) {
+    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) {
       endGame();
       return;
     }
@@ -379,14 +380,7 @@
     ctx.fillStyle = '#1e2128';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    const farLines = [];
-    const nearLines = [];
-    for (const line of sceneLines) {
-      const za = rotatePoint(line.a, cam.yaw, cam.pitch).z;
-      const zb = rotatePoint(line.b, cam.yaw, cam.pitch).z;
-      if ((za + zb) / 2 > 0) farLines.push(line); else nearLines.push(line);
-    }
-    drawLines(farLines);
+    drawFloor();
 
     const objects = snake.map((seg, i) => ({
       pos: seg, rgb: i === 0 ? HEAD_RGB : SNAKE_RGB, half: CUBE_HALF,
@@ -395,26 +389,25 @@
     objects.push({ pos: food, rgb: FOOD_RGB, half: CUBE_HALF * 0.8 * foodPulse });
 
     objects.forEach(o => {
-      o.center = worldCenter(o.pos);
+      const fp = floorPos(o.pos);
+      o.center = { x: fp.x, y: CUBE_HALF, z: fp.z };
       o.camZ = rotatePoint(o.center, cam.yaw, cam.pitch).z;
     });
     objects.sort((a, b) => b.camZ - a.camZ);
     objects.forEach(o => drawCube(o.center, o.half, o.rgb));
-
-    drawLines(nearLines);
   }
 
-  // --- input -------------------------------------------------------------
-  const ORBIT_KEYS = new Set(['a', 'd', 'q', 'e']);
-  const ROT_SPEED = 0.0018;
+  // --- input: arrow keys and WASD both move the snake, identically -------
+  const KEY_MAP = {
+    ArrowUp: { x: 0, y: -1 }, ArrowDown: { x: 0, y: 1 },
+    ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y: 0 },
+    w: { x: 0, y: -1 }, s: { x: 0, y: 1 },
+    a: { x: -1, y: 0 }, d: { x: 1, y: 0 },
+    W: { x: 0, y: -1 }, S: { x: 0, y: 1 },
+    A: { x: -1, y: 0 }, D: { x: 1, y: 0 },
+  };
 
   window.addEventListener('keydown', (e) => {
-    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    if (ORBIT_KEYS.has(k)) {
-      keysHeld.add(k);
-      e.preventDefault();
-      return;
-    }
     if (!alive) {
       if (e.key === ' ' || e.code === 'Space') {
         e.preventDefault();
@@ -422,64 +415,17 @@
       }
       return;
     }
-    let cand = null;
-    if (e.key === 'ArrowLeft') cand = { x: -1, y: 0, z: 0 };
-    else if (e.key === 'ArrowRight') cand = { x: 1, y: 0, z: 0 };
-    else if (e.key === 'ArrowUp') cand = { x: 0, y: 1, z: 0 };
-    else if (e.key === 'ArrowDown') cand = { x: 0, y: -1, z: 0 };
-    else if (k === 'w') cand = { x: 0, y: 0, z: -1 };
-    else if (k === 's') cand = { x: 0, y: 0, z: 1 };
-    if (!cand) return;
+    const wanted = KEY_MAP[e.key];
+    if (!wanted) return;
     e.preventDefault();
-    if (cand.x === -dir.x && cand.y === -dir.y && cand.z === -dir.z) return;
-    nextDir = cand;
+    if (wanted.x === -dir.x && wanted.y === -dir.y) return;
+    nextDir = wanted;
   });
-
-  window.addEventListener('keyup', (e) => {
-    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
-    keysHeld.delete(k);
-  });
-
-  function updateCameraFromKeys(dt) {
-    if (keysHeld.has('a')) cam.yaw -= ROT_SPEED * dt;
-    if (keysHeld.has('d')) cam.yaw += ROT_SPEED * dt;
-    if (keysHeld.has('q')) cam.pitch = clamp(cam.pitch + ROT_SPEED * dt, -1.4, 1.4);
-    if (keysHeld.has('e')) cam.pitch = clamp(cam.pitch - ROT_SPEED * dt, -1.4, 1.4);
-  }
-
-  function orbitStart(x, y) { dragging = true; lastMouseX = x; lastMouseY = y; canvas.classList.add('dragging'); }
-  function orbitMove(x, y) {
-    if (!dragging) return;
-    const dx = x - lastMouseX, dy = y - lastMouseY;
-    lastMouseX = x; lastMouseY = y;
-    cam.yaw += dx * 0.008;
-    cam.pitch = clamp(cam.pitch - dy * 0.008, -1.4, 1.4);
-  }
-  function orbitEnd() { dragging = false; canvas.classList.remove('dragging'); }
-
-  canvas.addEventListener('mousedown', (e) => orbitStart(e.clientX, e.clientY));
-  window.addEventListener('mousemove', (e) => orbitMove(e.clientX, e.clientY));
-  window.addEventListener('mouseup', orbitEnd);
-  canvas.addEventListener('touchstart', (e) => {
-    const t = e.touches[0];
-    orbitStart(t.clientX, t.clientY);
-  }, { passive: true });
-  canvas.addEventListener('touchmove', (e) => {
-    const t = e.touches[0];
-    orbitMove(t.clientX, t.clientY);
-  }, { passive: true });
-  canvas.addEventListener('touchend', orbitEnd);
 
   restartBtn.addEventListener('click', startRun);
 
-  // --- main loop (camera + rendering; game ticks run on their own interval) --
-  let lastTime = null;
+  // --- main loop (rendering only; game ticks run on their own interval) --
   function frame(ts) {
-    if (lastTime == null) lastTime = ts;
-    const dt = Math.min(100, ts - lastTime);
-    lastTime = ts;
-
-    updateCameraFromKeys(dt);
     render(ts);
     requestAnimationFrame(frame);
   }
